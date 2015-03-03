@@ -1,0 +1,8 @@
+name = Braintree VZero
+description = Integrates the awesomeness of Braintree VZero
+package = Braintree Vzero
+core = 7.x
+dependencies[] = commerce_order
+dependencies[] = commerce_payment
+
+

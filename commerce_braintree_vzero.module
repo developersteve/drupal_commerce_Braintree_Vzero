@@ -1,0 +1,216 @@
+<?php
+
+/**
+ * @file
+ * Braintree VZero integration for Drupal Commerce
+ * Developed by @DeveloperSteve from @Braintree_Dev
+ */
+
+
+/**
+ * Implements hook_commerce_payment_method_info().
+ */
+function commerce_braintree_vzero_commerce_payment_method_info() {
+  $payment_methods = array();
+
+  $payment_methods['commerce_braintree_vzero'] = array(
+    'title' => t('Accept Credit Card and PayPal via Braintree V.Zero'),
+    'short_title' => t('VZero'),
+    'base' => 'commerce_braintree_vzero',
+    'description' => t('Using Braintree V.Zero to facilitate payments.'),
+    'active' => TRUE,
+    'terminal' => FALSE,
+    'offsite' => FALSE,
+    'offsite_autoredirect' => FALSE,
+  );
+
+  return $payment_methods;
+}
+
+function commerce_braintree_vzero_default_settings() {
+  return array(
+    'merchant_id' => '',
+    'public_key' => '',
+    'private_key' => '',
+    'custom_field' => '',
+    'environment' => 'sandbox'
+  );
+}
+
+/**
+ * Payment method callback: Braintree Transparent Redirect settings form.
+ */
+function commerce_braintree_vzero_settings_form($settings = array()) {
+  $form = array();
+
+  $settings = (array) $settings + commerce_braintree_vzero_default_settings();
+
+  $form['merchant_id'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Merchant ID'),
+    '#default_value' => $settings['merchant_id'],
+    '#required' => TRUE,
+    '#prefix' => '<p>Populate these fields using the credentials found in the <a href="https://sandbox.braintreegateway.com" target="blank">Braintree Sandbox</a>.</p><p>The credentials are found in "My User" under "Account" in the top right, then "API Keys" under "Authorization".</p>',
+  );
+  $form['public_key'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Public key'),
+    '#default_value' => $settings['public_key'],
+    '#required' => TRUE,
+  );
+  $form['private_key'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Private key'),
+    '#default_value' => $settings['private_key'],
+    '#required' => TRUE,
+  );
+  $form['custom_field'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Custom field name - json string'),
+    '#description' => t('Stores the cart data in a json string as part of the Braintree transaction, this needs to be set in settings > processing then under custom fields'),
+    '#default_value' => $settings['custom_field'],
+    '#required' => FALSE,
+  );
+  $form['environment'] = array(
+    '#type' => 'radios',
+    '#title' => t('Braintree Environment'),
+    '#options' => array(
+      'sandbox' => ('Sandbox - For testing (not for building sandcastles)'),
+      'production' => ('Production - For going live (and still probably not for sandcastles)'),
+    ),
+    '#default_value' => $settings['environment'],
+  );
+
+  return $form;
+}
+
+function commerce_braintree_vzero_initialize($payment_method) {
+  require_once drupal_get_path('module', 'commerce_braintree_vzero') . '/braintree_php/lib/Braintree.php';
+
+  Braintree_Configuration::merchantId($payment_method['settings']['merchant_id']);
+  Braintree_Configuration::publicKey($payment_method['settings']['public_key']);
+  Braintree_Configuration::privateKey($payment_method['settings']['private_key']);
+  Braintree_Configuration::environment($payment_method['settings']['environment']);
+}
+
+/**
+ * Payment method callback: submit form.
+ */
+function commerce_braintree_vzero_submit_form($payment_method, $pane_values, $checkout_pane, $order) {
+
+    commerce_braintree_vzero_initialize($payment_method);
+
+    $token = Braintree_ClientToken::generate(array());
+
+    $form['commerce_braintree_vzero'] = array();
+
+    $form['commerce_braintree_vzero']['nonce'] = array(
+      '#type' => 'hidden',
+      '#title' => t('nonce'),
+      '#default_value' => '',
+      '#prefix' => '<div id="Braintree_Cart"></div>',
+      '#suffix' => '<script src="https://js.braintreegateway.com/v2/braintree.js"></script><script>braintree.setup("'.$token.'", "dropin", {container: "Braintree_Cart",paymentMethodNonceReceived: function (event, nonce) { jQuery("input[name=\'commerce_payment[payment_details][commerce_braintree_vzero][nonce]\']").val(nonce); jQuery( "form" ).submit();}})</script>',
+    );
+
+    return $form;
+}
+
+/**
+ * Payment method callback: submit form validation.
+ */
+function commerce_braintree_vzero_submit_form_validate($payment_method, $pane_form, $pane_values, $order, $form_parents = array()) {
+
+  if (!$pane_values['commerce_braintree_vzero']['nonce']) {
+    return FALSE;
+  }else{
+
+    commerce_braintree_vzero_initialize($payment_method);
+
+    $amt = number_format(($order->commerce_order_total['und'][0]['amount']*0.01), 2, '.', '');
+
+    $query = array(
+     'amount' => $amt,
+     'paymentMethodNonce' => $pane_values['commerce_braintree_vzero']['nonce'],
+    );
+
+    if($payment_method['settings']['custom_field']){
+
+     $output = array();
+
+      foreach($order->commerce_line_items['und'] as $item){
+        $line_item = commerce_line_item_load($item['line_item_id']);
+
+        $name = $line_item->line_item_label;
+        $qty = $line_item->quantity;
+        $amt = number_format(($line_item->commerce_order_total['und'][0]['amount']*0.01), 2, '.', '');
+
+        $output[] = array(
+            'qty' => $qty,
+            'itemName' => $name,
+            'price' => $amt,
+          );
+
+      }
+
+      $output[] = array(
+          'total' => number_format(($order->commerce_order_total['und'][0]['amount']*0.01), 2, '.', '')
+        );
+
+      $output = json_encode($output);
+
+      $qfield = $payment_method['settings']['custom_field'];
+
+      $query2 = array(
+        'customFields' => array(
+          $qfield => $output,
+        ),
+      );
+
+      $query = array_merge($query, $query2);
+    }
+
+    $result = Braintree_Transaction::sale($query);
+
+    if ($result->success == 1) {
+      $order->data['commerce_braintree_vzero']['id'] = $result->transaction->_attributes['id'];
+    } else {
+      return FALSE;
+    }
+
+  }
+
+
+}
+
+/**
+ * Payment method callback: submit form submission.
+ */
+function commerce_braintree_vzero_submit_form_submit($payment_method, $pane_form, $pane_values, $order, $charge) {
+
+  $order->data['commerce_braintree_vzero']['nonce'] = $pane_values['commerce_braintree_vzero']['nonce'];
+
+  commerce_braintree_vzero_transaction($payment_method, $order, $charge);
+}
+
+/**
+ * Creates an example payment transaction for the specified charge amount.
+ *
+ * @param $payment_method
+ *   The payment method instance object used to charge this payment.
+ * @param $order
+ *   The order object the payment applies to.
+ * @param $charge
+ *   An array indicating the amount and currency code to charge.
+ */
+function commerce_braintree_vzero_transaction($payment_method, $order, $charge) {
+
+  $transaction = commerce_payment_transaction_new('commerce_braintree_vzero', $order->order_id);
+  $transaction->instance_id = $payment_method['instance_id'];
+  $transaction->remote_id = $order->data['commerce_braintree_vzero']['id'];
+  $transaction->amount = $charge['amount'];
+  $transaction->currency_code = $charge['currency_code'];
+  $transaction->status = COMMERCE_PAYMENT_STATUS_SUCCESS;
+
+  commerce_payment_transaction_save($transaction);
+  return $transaction;
+}
